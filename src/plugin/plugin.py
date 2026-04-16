@@ -37,7 +37,6 @@ from enigma import eServiceReference, eTimer, ePythonMessagePump, \
 	iPlayableService, fbClass, eRCInput, getDesktop, eDVBVolumecontrol
 from .server import KodiExtRequestHandler, UDSServer
 
-# ADDED: LCD import
 try:
 	from Components.Lcd import lcd
 except ImportError:
