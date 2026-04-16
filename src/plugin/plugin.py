@@ -37,6 +37,12 @@ from enigma import eServiceReference, eTimer, ePythonMessagePump, \
 	iPlayableService, fbClass, eRCInput, getDesktop, eDVBVolumecontrol
 from .server import KodiExtRequestHandler, UDSServer
 
+# ADDED: LCD import
+try:
+	from Components.Lcd import lcd
+except ImportError:
+	lcd = None
+
 config.kodi = ConfigSubsection()
 config.kodi.addToMainMenu = ConfigYesNo(False)
 config.kodi.addToExtensionMenu = ConfigYesNo(True)
@@ -838,6 +844,25 @@ class E2KodiExtServer(UDSServer):
 		SESSION.open(VideoInfoView)
 
 
+# ADDED: KodiLauncherSummary class for LCD logo display
+class KodiLauncherSummary(Screen):
+	skin = """
+	<screen position="fill">
+		 <widget name="kodi" position="fill" alphatest="blend" />
+	</screen>"""
+
+	def __init__(self, session, parent):
+		Screen.__init__(self, session, parent=parent)
+		logo = None
+		# Try to find Kodi logo image
+		if exists("/usr/share/kodi/media/vendor_logo.png"):
+			logo = "/usr/share/kodi/media/vendor_logo.png"
+		elif exists("/usr/share/kodi/media/splash.jpg"):
+			logo = "/usr/share/kodi/media/splash.jpg"
+		if logo:
+			self["kodi"] = WebPixmap(logo, caching=True)
+
+
 class KodiLauncher(Screen):
 	skin = """<screen position="fill" backgroundColor="#FF000000" flags="wfNoBorder" title=" "></screen>"""
 
@@ -850,6 +875,10 @@ class KodiLauncher(Screen):
 		self.startupTimer.timeout.get().append(self.startup)
 		self.startupTimer.start(500, True)
 		self.onClose.append(RCUnlock)
+
+	# ADDED: createSummary method for LCD logo
+	def createSummary(self):
+		return KodiLauncherSummary
 
 	def startup(self):
 		def psCallback(data, retval, extraArgs):
