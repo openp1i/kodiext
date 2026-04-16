@@ -1,6 +1,6 @@
 from json import load, dumps
 from os import chmod, remove, system
-from os.path import basename, exists
+from os.path import basename, exists, isfile
 import threading
 from queue import Queue
 
@@ -9,7 +9,7 @@ from enigma import eTimer, fbClass, eRCInput, getDesktop, eDVBVolumecontrol
 from Components.ActionMap import ActionMap
 from Components.Label import Label
 from Plugins.SystemPlugins.Videomode.VideoHardware import video_hw
-from Components.config import config, ConfigSubsection, ConfigYesNo
+from Components.config import config, ConfigSubsection, ConfigYesNo, ConfigSelection
 from Components.ActionMap import HelpableActionMap
 from Components.Console import Console
 from Components.PluginComponent import PluginDescriptor
@@ -27,7 +27,7 @@ from Screens.Standby import QUIT_KODI, TryQuitMainloop
 
 from Screens.InfoBarGenerics import InfoBarNotifications, InfoBarSeek, InfoBarAudioSelection, InfoBarShowHide, InfoBarSubtitleSupport
 from Tools.BoundFunction import boundFunction
-from Tools.Directories import fileWriteLine, fileReadLine
+from Tools.Directories import fileWriteLine, fileReadLine, fileExists
 from Tools import Notifications
 
 from .e2utils import InfoBarAspectChange, WebPixmap, MyAudioSelection, \
@@ -37,10 +37,20 @@ from enigma import eServiceReference, eTimer, ePythonMessagePump, \
 	iPlayableService, fbClass, eRCInput, getDesktop, eDVBVolumecontrol
 from .server import KodiExtRequestHandler, UDSServer
 
+# LCD import
+try:
+	from Components.Lcd import lcd
+except ImportError:
+	lcd = None
+
+# Define player choices
+players = [("VideoPlayer", "VideoPlayer"), ("E2Player", "E2Player"), ("GstPlayer", "GstPlayer")]
+
 config.kodi = ConfigSubsection()
 config.kodi.addToMainMenu = ConfigYesNo(False)
 config.kodi.addToExtensionMenu = ConfigYesNo(True)
 config.kodi.standalone = ConfigYesNo(False)
+config.kodi.player = ConfigSelection(default="VideoPlayer", choices=players)
 
 MACHINEBRAND = BoxInfo.getItem("displaybrand")
 
@@ -214,14 +224,48 @@ def RCUnlock():
 	eRCInput.getInstance().unlock()
 
 
+def showLcdLogo():
+	"""Display Kodi logo on LCD"""
+	if lcd is not None:
+		try:
+			# Try to load Kodi logo from various possible locations
+			logo_paths = [
+				"/usr/share/kodi/media/vendor_logo.png",
+				"/usr/share/kodi/media/splash.jpg",
+				"/usr/lib/enigma2/python/Plugins/Extensions/Kodi/image/kodi_logo.png",
+				"/usr/lib/enigma2/python/Plugins/Extensions/Kodi/kodi.png"
+			]
+			for logo_path in logo_paths:
+				if fileExists(logo_path):
+					lcd.showPixmap(logo_path)
+					print("[KodiLauncher] LCD Kodi logo displayed from:", logo_path)
+					return
+			# If no logo image found, show text on LCD
+			lcd.showText(_("Kodi"))
+			print("[KodiLauncher] LCD Kodi text displayed")
+		except Exception as e:
+			print("[KodiLauncher] Failed to show LCD Kodi logo:", str(e))
+
+
+def clearLcd():
+	"""Clear LCD display"""
+	if lcd is not None:
+		try:
+			lcd.clear()
+			print("[KodiLauncher] LCD cleared")
+		except Exception as e:
+			print("[KodiLauncher] Failed to clear LCD:", str(e))
+
+
 def kodiStopped(data, retval, extraArgs):
 	print(f"[KodiLauncher] kodi stopped: retval = {retval}")
-	# KODI_LAUNCHER.stop()
+	# Clear LCD when Kodi stops
+	clearLcd()
 
 
 def kodiResumeStopped(data, retval, extraArgs):
 	print('[KodiLauncher] kodi resume script stopped: retval = %d' % retval)
-	if retval > 0:
+	if retval > 0 and KODI_LAUNCHER:
 		KODI_LAUNCHER.stop()
 
 
@@ -232,12 +276,15 @@ class KodiVideoPlayer(InfoBarBase, InfoBarShowHide, SubsSupportStatus, SubsSuppo
 			<widget source="global.CurrentTime" render="Label" position="1700,34" size="150,67" font="RegularHD; 32" backgroundColor="#10000000" transparent="1" zPosition="3" halign="center">
 			  <convert type="ClockToText">Default</convert>
 			</widget>
-			<eLabel name="" position="0,15" size="1924,125" zPosition="-10"/>
+			<widget name="endsat" position="1447,85" size="300,37" zPosition="6" font="RegularHD;22" halign="right"/>
+			<widget source="session.CurrentService" render="Label" position="1751,85" size="150,37" zPosition="6" font="RegularHD;22" halign="left" transparent="1">
+				<convert type="ServicePosition">EndTime,ShowNoSeconds</convert>
+			</widget>
+			<widget name="logo" position="65,22" size="500,95" alphatest="on" transparent="1"/>
+			<eLabel name="" position="0,0" size="1924,140" zPosition="-10"/>
 			<eLabel position="0,856" zPosition="-11" size="1921,224" />
 			<widget name="image" position="30,780" size="300,300" alphatest="on" transparent="1"/>
-			<widget source="session.CurrentService" render="Label" position="65,44" size="1845,38" zPosition="1"  font="RegularHD;24" valign="center" halign="left" foregroundColor="#00ffa533" transparent="1">
-			  <convert type="ServiceName">Name</convert>
-			</widget>
+			<widget name="stitle" position="65,44" size="1845,38" zPosition="2" font="RegularHD;24" valign="center" halign="left" foregroundColor="#00ffa533" transparent="1"/>
 			<widget name="genre" position="65,86" size="1845,35" zPosition="2" font="RegularHD;19" valign="center" halign="left"/>
 			<eLabel name="progressbar-back" position="343,900" size="1500,4" backgroundColor="#00cccccc" />
 			<widget source="session.CurrentService" render="Progress" foregroundColor="#00007eff" backgroundColor="#00ffffff" position="343,897" size="1500,10" zPosition="7" transparent="0">
@@ -293,12 +340,15 @@ class KodiVideoPlayer(InfoBarBase, InfoBarShowHide, SubsSupportStatus, SubsSuppo
 			<widget source="global.CurrentTime" render="Label" position="1133,22" size="100,44" font="Regular; 32" backgroundColor="#10000000" transparent="1" zPosition="3" halign="center">
 			  <convert type="ClockToText">Default</convert>
 			</widget>
-			<eLabel name="" position="0,10" size="1282,83" zPosition="-10"/>
+			<widget name="endsat" position="964,56" size="200,24" zPosition="6" font="Regular;22" halign="right"/>
+			<widget source="session.CurrentService" render="Label" position="1167,56" size="100,24" zPosition="6" font="Regular;22" halign="left" transparent="1">
+				<convert type="ServicePosition">EndTime,ShowNoSeconds</convert>
+			</widget>
+			<widget name="logo" position="43,45" size="333,21" alphatest="on" transparent="1"/>
+			<eLabel name="" position="0,0" size="1282,93" zPosition="-10"/>
 			<eLabel position="0,570" zPosition="-11" size="1280,149" />
 			<widget name="image" position="20,520" size="200,200" alphatest="on" transparent="1"/>
-			<widget source="session.CurrentService" render="Label" position="43,29" size="1230,25" zPosition="1"  font="Regular;24" valign="center" halign="left" foregroundColor="#00ffa533" transparent="1">
-			  <convert type="ServiceName">Name</convert>
-			</widget>
+			<widget name="stitle" position="43,29" size="1230,25" zPosition="2" font="Regular;24" valign="center" halign="left" foregroundColor="#00ffa533" transparent="1"/>
 			<widget name="genre" position="43,57" size="1230,23" zPosition="2" font="Regular;19" valign="center" halign="left"/>
 			<eLabel name="progressbar-back" position="228,600" size="1000,2" backgroundColor="#00cccccc" />
 			<widget source="session.CurrentService" render="Progress" foregroundColor="#00007eff" backgroundColor="#00ffffff" position="228,598" size="1000,6" zPosition="7" transparent="0">
@@ -380,6 +430,8 @@ class KodiVideoPlayer(InfoBarBase, InfoBarShowHide, SubsSupportStatus, SubsSuppo
 		self.__position = None
 		self.__firstStart = True
 		self["genre"] = Label()
+		self["stitle"] = Label()
+		self["endsat"] = Label(_("Ends at"))
 
 		# load meta info from json file provided by Kodi Enigma2Player
 		try:
@@ -387,16 +439,29 @@ class KodiVideoPlayer(InfoBarBase, InfoBarShowHide, SubsSupportStatus, SubsSuppo
 		except Exception as e:
 			self.logger.error("failed to load meta from %s: %s", KODIEXTIN, str(e))
 			meta = {}
-		self.__image = Meta(meta).getImage()
+		self.__image = Meta(meta).getImage("season.poster")
 		self["image"] = WebPixmap(self.__image, caching=True)
+		self.__logo = Meta(meta).getImage("clearlogo")
+		if self.__logo != "":
+			self["logo"] = WebPixmap(self.__logo, caching=True)
+			self["logo"].hide()
 
 		self.genre = str(", ".join(Meta(meta).getGenre()))
 		self.plot = Meta(meta).getPlot()
 
 		self["genre"].setText(self.genre)
+		self["genre"].hide()
 
 		# set title, image if provided
-		self.title_ref = Meta(meta).getTitle()
+		title = Meta(meta).getTitle()
+		if title:
+			try:
+				import re
+				title = re.sub(r"\[.*?\]","",str(title), flags=re.DOTALL)
+			except:
+				pass
+
+		self.title_ref = title
 
 		# set start position if provided
 		self.setStartPosition(Meta(meta).getStartTime())
@@ -410,6 +475,11 @@ class KodiVideoPlayer(InfoBarBase, InfoBarShowHide, SubsSupportStatus, SubsSuppo
 		self["okCancelActions"] = HelpableActionMap(self, "OkCancelActions",
 		{
 			"cancel": self.close
+		})
+
+		self["ColorActions"] = HelpableActionMap(self, "ColorActions",
+		{
+			"blue": self.subtitleSelection,
 		})
 
 		self["actions"] = HelpableActionMap(self, "KodiPlayerActions",
@@ -439,6 +509,10 @@ class KodiVideoPlayer(InfoBarBase, InfoBarShowHide, SubsSupportStatus, SubsSuppo
 		self.onClose.append(boundFunction(Notifications.RemovePopup, self.RESUME_POPUP_ID))
 		self.onClose.append(self.__timer.stop)
 
+	def createSummary(self):
+		from Screens.InfoBarGenerics import InfoBarMoviePlayerSummary
+		return InfoBarMoviePlayerSummary
+
 	def keyr(self):
 		try:
 			if exists("/usr/lib/enigma2/python/Plugins/Extensions/TimeSleep/plugin.py") or exists("/usr/lib/enigma2/python/Plugins/Extensions/TimeSleep/plugin.so"):
@@ -460,6 +534,16 @@ class KodiVideoPlayer(InfoBarBase, InfoBarShowHide, SubsSupportStatus, SubsSuppo
 			InfoBarSeek.seekBackManual(self)
 
 	def __evStart(self):
+		x = self["genre"].getPosition()[0]
+		if hasattr(self, '_KodiVideoPlayer__logo') and self.__logo != "":
+			x = 580 if esHD() else 387
+			self["genre"].move(x, self["genre"].getPosition()[1])
+			self["stitle"].move(x, self["stitle"].getPosition()[1])
+			self["logo"].show()
+		self["genre"].show()
+		self["stitle"].setText(self.title_ref)
+		self["stitle"].show()
+
 		if self.__position and self.__firstStart:
 			self.__firstStart = False
 			Notifications.AddNotificationWithID(self.RESUME_POPUP_ID,
@@ -479,7 +563,7 @@ class KodiVideoPlayer(InfoBarBase, InfoBarShowHide, SubsSupportStatus, SubsSuppo
 
 	def setStartPosition(self, positionInSeconds):
 		try:
-			self.__position = positionInSeconds * 90 * 1000
+			self.__position = int(positionInSeconds) * 90 * 1000
 		except Exception:
 			self.__position = None
 
@@ -513,8 +597,11 @@ class Meta(object):
 	def getTitle(self):
 		title = u""
 		vTag = self.meta.get('videoInfoTag')
+		islogo = self.getImage('clearlogo') != ""
 		if vTag:
-			if vTag.get('showtitle'):
+			if islogo:
+				title = vTag.get("title") or vTag.get("originaltitle")
+			elif vTag.get('showtitle'):
 				title = vTag["showtitle"]
 				episode = vTag.get("episode", -1)
 				try:
@@ -562,16 +649,35 @@ class Meta(object):
 			startTime = playerOptions.get("startTime", 0)
 		return startTime
 
-	def getImage(self):
+	def getImage(self, Item="thumb"):
 		image = None
 		listItem = self.meta.get("listItem")
 		if listItem:
-			image = listItem.get("CacheThumb", "")
+			if Item == "thumb":
+				image = listItem.get("CacheThumb", "")
 			fanart = listItem.get("Fanart", "")
 			imageweb = ""
 			if fanart:
-				imageweb = fanart.get("thumb", "") if isinstance(fanart, dict) else fanart
-			if imageweb.startswith("http"):
+				if Item == "thumb":
+					imageweb = fanart.get("thumb", "") if isinstance(fanart, dict) else fanart
+				elif Item == "clearlogo":
+					imageweb = fanart.get("clearlogo", "") if isinstance(fanart, dict) else ""
+					if not imageweb:
+						imageweb = fanart.get("logo", "") if isinstance(fanart, dict) else ""
+				elif Item == "season.poster":
+					image = "" if isinstance(fanart, str) else fanart.get("season.poster", "")
+					if image == "":
+						image = "" if isinstance(fanart, str) else fanart.get("poster", "")
+					if image == "":
+						image = listItem.get("CacheThumb", "")
+						if not fileExists(image):
+							image = "" if isinstance(fanart, str) else fanart.get("thumb", "")
+					if image == "":
+						image = "" if isinstance(fanart, str) else fanart.get("fanart", "")
+					return image
+				else:
+					image = "" if isinstance(fanart, str) else fanart.get(Item, "")
+			if imageweb and imageweb.startswith("http"):
 				if not exists(image):
 					image = imageweb
 			else:
@@ -633,10 +739,10 @@ class VideoInfoView(Screen):
 		skin = """
 		<screen position="center,center" size="1150,600" title="View Video Info" >
 		   <widget name="image" position="15,150" size="300,400" alphatest="on" transparent="1"/>
-		   <widget source="session.CurrentService" render="Label" position="20,20" size="1110,42" zPosition="1"  font="RegularHD;26" valign="center" halign="left" foregroundColor="#00ffa533" transparent="1">
-			   <convert type="ServiceName">Name</convert>
-		   </widget>
-		   <widget name="genre" position="20,70" size="1110,35" zPosition="2" font="RegularHD;19" valign="center" halign="left"/>
+		   <widget name="logo" position="20,22" size="333,65" zPosition="2" alphatest="on" transparent="1"/>
+		   <widget name="stitle" position="20,20" size="1110,42" zPosition="1"  font="RegularHD;26" valign="center" halign="left" foregroundColor="#00ffa533" transparent="1"/>
+		   <widget name="thumb" position="960,5" size="175,100" alphatest="on" transparent="0"/>
+		   <widget name="genre" position="20,70" size="1110,35" zPosition="1" font="RegularHD;19" valign="center" halign="left" transparent="1"/>
 		   <eLabel name="linea" position="20,110" size="1110,2" foregroundColor="#40444444" transparent="0" zPosition="20" backgroundColor="#30555555"/>
 		   <widget source="description" position="330,150" size="800,400" font="RegularHD; 20" render="RunningTextSpa" options="movetype=swimming,startpoint=0,direction=top,steptime=100,repeat=0,always=0,oneshot=0,startdelay=15000,pause=500,backtime=5" noWrap="0"/>
 		</screen>"""
@@ -644,10 +750,10 @@ class VideoInfoView(Screen):
 		skin = """
 		<screen position="center,center" size="766,400" title="View Video Info" >
 		   <widget name="image" position="10,100" size="200,266" alphatest="on" transparent="1"/>
-		   <widget source="session.CurrentService" render="Label" position="13,13" size="740,28" zPosition="1"  font="Regular;26" valign="center" halign="left" foregroundColor="#00ffa533" transparent="1">
-			   <convert type="ServiceName">Name</convert>
-		   </widget>
-		   <widget name="genre" position="13,46" size="740,23" zPosition="2" font="Regular;19" valign="center" halign="left"/>
+		   <widget name="logo" position="13,15" size="222,43" zPosition="2" alphatest="on" transparent="1"/>
+		   <widget name="stitle" position="13,13" size="740,28" zPosition="1"  font="Regular;26" valign="center" halign="left" foregroundColor="#00ffa533" transparent="1"/>
+		   <widget name="thumb" position="640,3" size="117,67" alphatest="on" transparent="0"/>
+		   <widget name="genre" position="13,46" size="740,23" zPosition="1" font="Regular;19" valign="center" halign="left" transparent="1"/>
 		   <eLabel name="linea" position="13,73" size="740,1" foregroundColor="#40444444" transparent="0" zPosition="20" backgroundColor="#30555555"/>
 		   <widget source="description" position="220,100" size="533,266" font="Regular; 20" render="RunningTextSpa" options="movetype=swimming,startpoint=0,direction=top,steptime=100,repeat=0,always=0,oneshot=0,startdelay=15000,pause=500,backtime=5" noWrap="0"/>
 		</screen>"""
@@ -658,26 +764,57 @@ class VideoInfoView(Screen):
 
 		self["genre"] = Label()
 		self["description"] = Label()
+		self["stitle"] = Label()
 		# load meta info from json file provided by Kodi Enigma2Player
 		try:
 			meta = load(open(KODIEXTIN, "r"))
 		except Exception as e:
 			self.logger.error("failed to load meta from %s: %s", KODIEXTIN, str(e))
 			meta = {}
-		self.__image = Meta(meta).getImage()
+		self.__image = Meta(meta).getImage("season.poster")
 		self["image"] = WebPixmap(self.__image, caching=True)
+		self["thumb"] = WebPixmap(Meta(meta).getImage("thumb"), caching=True)
+		self.__logo = Meta(meta).getImage("clearlogo")
+		if self.__logo != "":
+			self["logo"] = WebPixmap(self.__logo, caching=True)
+			self["logo"].hide()
 
 		self.genre = str(", ".join(Meta(meta).getGenre()))
 		self.plot = str(Meta(meta).getPlot())
 
 		self["genre"].setText(self.genre)
 		self["description"].setText(self.plot)
+		self["genre"].hide()
+		self["stitle"].hide()
+
+		title = Meta(meta).getTitle()
+		if title:
+			try:
+				import re
+				title = re.sub(r"\[.*?\]","",str(title), flags=re.DOTALL)
+			except:
+				pass
+
+		self.title_ref = title
 
 		self["actions"] = ActionMap(["OkCancelActions"],
 		{
 				"cancel": self.close,
 				"ok": self.close
 		}, -1)
+
+		self.onShow.append(self.__onShow)
+
+	def __onShow(self):
+		x = self["genre"].getPosition()[0]
+		if self.__logo != "":
+			x = 365 if esHD() else 243
+			self["genre"].move(x, self["genre"].getPosition()[1])
+			self["stitle"].move(x, self["stitle"].getPosition()[1])
+			self["logo"].show()
+		self["stitle"].setText(self.title_ref)
+		self["genre"].show()
+		self["stitle"].show()
 
 
 class E2KodiExtRequestHandler(KodiExtRequestHandler):
@@ -697,6 +834,10 @@ class E2KodiExtServer(UDSServer):
 		self.messageOut = Queue()
 		self.messagePump = ePythonMessagePump()
 		self.messagePump.recv_msg.get().append(self.messageReceived)
+		self.startTimer = eTimer()
+		self.startTimer.timeout.get().append(self.player)
+		self.endTimer = eTimer()
+		self.endTimer.timeout.get().append(self.end)
 
 	def shutdown(self):
 		self.messagePump.stop()
@@ -746,7 +887,7 @@ class E2KodiExtServer(UDSServer):
 		self.messageIn.put((True, None))
 		self.stopTimer = eTimer()
 		self.stopTimer.callback.append(KODI_LAUNCHER.stop)
-		self.stopTimer.start(500, True)
+		self.stopTimer.start(1000, True)
 
 	def handleSwitchToKodiMessage(self, status, data):
 		self.messageIn.put((True, None))
@@ -762,11 +903,19 @@ class E2KodiExtServer(UDSServer):
 		setaudio.switch(False, True)
 		if MACHINEBRAND not in ('Vu+', 'Formuler'):
 			setresolution.switch(False, True)
+		self.status = status
+		self.data = data
+		self.startTimer.start(1000, True)
+
+	def player(self):
+		self.startTimer.stop()
 		# parse subtitles, play path and service type from data
 		sType = 4097
 		subtitles = []
-		if isinstance(data, bytes):
-			data = data.decode()
+		if isinstance(self.data, bytes):
+			data = self.data.decode()
+		else:
+			data = self.data
 		dataSplit = data.strip().split("\n")
 		if len(dataSplit) == 1:
 			playPath = dataSplit[0]
@@ -830,7 +979,13 @@ class E2KodiExtServer(UDSServer):
 		setaudio.switch(True, True)
 		if MACHINEBRAND not in ('Vu+', 'Formuler'):
 			setresolution.switch(True, True)
+		self.endTimer.start(600, True)
+
+	def end(self):
+		self.endTimer.stop()
 		SESSION.nav.stopService()
+		if MACHINEBRAND not in ('Vu+', 'Formuler'):
+			setresolution.switch(True, True)
 		self.kodiPlayer = None
 		self.subtitles = []
 
@@ -838,18 +993,46 @@ class E2KodiExtServer(UDSServer):
 		SESSION.open(VideoInfoView)
 
 
+class KodiLauncherSummary(Screen):
+	skin = """
+	<screen position="fill">
+		 <widget name="kodi" position="fill" alphatest="blend" />
+	</screen>"""
+
+	def __init__(self, session, parent):
+		Screen.__init__(self, session, parent=parent)
+		logo = None
+		if fileExists("/usr/share/kodi/media/vendor_logo.png"):
+			logo = "/usr/share/kodi/media/vendor_logo.png"
+		elif fileExists("/usr/share/kodi/media/splash.jpg"):
+			logo = "/usr/share/kodi/media/splash.jpg"
+		if logo:
+			self["kodi"] = WebPixmap(logo, caching=True)
+
+
 class KodiLauncher(Screen):
-	skin = """<screen position="fill" backgroundColor="#FF000000" flags="wfNoBorder" title=" "></screen>"""
+	if esHD():
+		skin = """<screen position="fill" size="1920,1080" backgroundColor="#FF000000" flags="wfNoBorder" title=" "></screen>"""
+	else:
+		skin = """<screen position="fill" size="1280,720" backgroundColor="#FF000000" flags="wfNoBorder" title=" "></screen>"""
 
 	def __init__(self, session):
 		Screen.__init__(self, session)
 		RCLock()
+		# Show Kodi logo on LCD when starting Kodi
+		showLcdLogo()
 		self.previousService = self.session.nav.getCurrentlyPlayingServiceReference()
 		self.session.nav.stopService()
 		self.startupTimer = eTimer()
 		self.startupTimer.timeout.get().append(self.startup)
-		self.startupTimer.start(500, True)
-		self.onClose.append(RCUnlock)
+		self.startupTimer.start(1000, True)
+		self.endTimer = eTimer()
+		self.endTimer.timeout.get().append(self.end)
+		self.endTimer1 = eTimer()
+		self.endTimer1.timeout.get().append(self.end1)
+
+	def createSummary(self):
+		return KodiLauncherSummary
 
 	def startup(self):
 		def psCallback(data, retval, extraArgs):
@@ -857,12 +1040,12 @@ class KodiLauncher(Screen):
 			kodiProc = None
 			if isinstance(data, bytes):
 				data = data.decode()
-			procs = data.split("\n")
+			procs = data.split('\n')
 			if len(procs) > 0:
 				for p in procs:
-					if "kodi.bin" in p:
+					if 'kodi.bin' in p:
 						if kodiProc is not None:
-							print("[KodiLauncher] startup - there are more kodi processes running!")
+							print('[KodiLauncher] startup - there are more kodi processes running!')
 							return self.stop()
 						kodiProc = p.split()
 			if kodiProc is not None:
@@ -873,6 +1056,8 @@ class KodiLauncher(Screen):
 				print("[KodiLauncher] startup: kodi is not running, starting...")
 				self.startKodi()
 
+		setaudio.switch(True)
+		setresolution.switch(True)
 		self._checkConsole = Console()
 		self._checkConsole.ePopen("ps | grep kodi.bin | grep -v grep", psCallback)
 
@@ -885,9 +1070,20 @@ class KodiLauncher(Screen):
 		self._resumeConsole.ePopen(KODIRESUME_SCRIPT % pid, kodiResumeStopped)
 
 	def stop(self):
+		# Clear LCD when Kodi stops (this is called when Kodi exits)
+		clearLcd()
 		FBUnlock()
+		RCUnlock()
 		setaudio.switch()
+		self.endTimer1.start(1000, True)
+
+	def end1(self):
+		self.endTimer1.stop()
 		setresolution.switch()
+		self.endTimer.start(1000, True)
+
+	def end(self):
+		self.endTimer.stop()
 		if self.previousService:
 			self.session.nav.playService(self.previousService)
 		try:
@@ -917,23 +1113,71 @@ def autoStart(reason, **kwargs):
 		SERVER_THREAD.join()
 
 
+def WriteDefaultPlayer():
+	import xml.etree.ElementTree as ET
+	if config.kodi.standalone.value and config.kodi.player.value == "E2Player":
+		player = "VideoPlayer"
+	else:
+		player = config.kodi.player.value
+	if fileExists("/usr/share/kodi/system/advancedsettings.xml"):
+		try:
+			players = ET.parse("/usr/share/kodi/system/advancedsettings.xml")
+			if players:
+				root = players.getroot()
+				video = root.find('video')
+				if video != None:
+					default = video.find('defaultplayer')
+					if default == None:
+						default = ET.SubElement(video, 'defaultplayer')
+					default.text = player
+				else:
+					video = ET.SubElement(root, 'video')
+					default = ET.SubElement(video, 'defaultplayer')
+					default.text = player
+				ET.indent(root, space="  ", level=0)
+				players.write("/usr/share/kodi/system/advancedsettings.xml")
+		except:
+			pass
+
+	if fileExists("/usr/share/kodi/system/playercorefactory.xml"):
+		try:
+			corefactory = ET.parse("/usr/share/kodi/system/playercorefactory.xml")
+			root = corefactory.getroot()
+			if corefactory:
+				for child in root:
+					if child.tag == "rules" and child.get('name') == "defaultplayer" and child.get('action') == "prepend":
+						root.remove(child)
+				if player != "VideoPlayer":
+					child = ET.SubElement(root, 'rules')
+					child.set('name', 'defaultplayer')
+					child.set('action', 'prepend')
+					rule = ET.SubElement(child, 'rule')
+					rule.set('filetypes', 'dts|mp3|wav|wave|oga|ogg|flac|m4a|mp2|m2a|ac3|mka|aac|ape|alac|mpg|vob|m4v|mkv|avi|divx|dat|flv|mp4|mov|wmv|asf|3gp|3g2|mpeg|mpe|rm|rmvb|ogm|ogv|stream|amr|au|mid|wv|pva|wtv|ts|m2ts')
+					rule.set('player', player)
+				ET.indent(root, space="  ", level=0)
+				corefactory.write("/usr/share/kodi/system/playercorefactory.xml")
+		except:
+			pass
+
+
 def startLauncher(session, **kwargs):
 	if config.kodi.standalone.value:
+		WriteDefaultPlayer()
 		session.open(TryQuitMainloop, retvalue=QUIT_KODI)
 	else:
 		setaudio.ReadData()
-		# setaudio.switch(True)
 		setresolution.ReadData()
-		eRCInput.getInstance().unlock()
+		RCUnlock()
 		global SESSION
 		SESSION = session
 		global KODI_LAUNCHER
+		WriteDefaultPlayer()
 		KODI_LAUNCHER = session.open(KodiLauncher)
 
 
 def startMenuLauncher(menuid, **kwargs):
-	if menuid == "mainmenu":
-		return [("Kodi", startLauncher, "kodi", 1)]
+	if menuid == "setup":
+		return [(_("Kodi Settings"), startSetup, "kodi", 1)]
 	return []
 
 
@@ -960,11 +1204,10 @@ def Plugins(**kwargs):
 	screenwidth = getDesktop(0).size().width()
 	kodiext = "kodiext_FHD.png" if screenwidth and screenwidth == 1920 else "kodiext_HD.png"
 	l = [
-		PluginDescriptor("Kodi", PluginDescriptor.WHERE_AUTOSTART, "Kodi Launcher", fnc=autoStart),
-		PluginDescriptor("Kodi", PluginDescriptor.WHERE_PLUGINMENU, "Kodi Settings", icon=kodiext, fnc=startSetup)
+		PluginDescriptor("Kodi", PluginDescriptor.WHERE_AUTOSTART, _("Kodi Launcher"), fnc=autoStart),
+		PluginDescriptor("Kodi", PluginDescriptor.WHERE_PLUGINMENU, _("Kodi Settings"), icon=kodiext, fnc=startSetup)
 	  ]
-	if config.kodi.addToMainMenu.value:
-		l.append(PluginDescriptor(name="Kodi", where=PluginDescriptor.WHERE_MENU, fnc=startMenuLauncher))
 	if config.kodi.addToExtensionMenu.value:
 		l.append(PluginDescriptor(name="Kodi", where=PluginDescriptor.WHERE_EXTENSIONSMENU, icon=kodiext, fnc=startLauncher))
+	l.append(PluginDescriptor(name="Kodi", where=PluginDescriptor.WHERE_MENU, fnc=startMenuLauncher))
 	return l
